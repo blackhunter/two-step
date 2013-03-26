@@ -1,10 +1,11 @@
-function ParamList(step, name) {
-	this._idx = 1;
+function ParamList(step, name, sub) {
+	this._idx = 0;
 	this._used = false;
 	this.vals = [ null ];
 	this.pending = [];
 	this.step = step;
 	this.name = name;
+	this.subParamList = sub || false;
 }
 ParamList.prototype = {
 	nextIdx: function() {
@@ -21,13 +22,10 @@ ParamList.prototype = {
 		}
 	},
 	done: function(idx, val) {
-		for(var i = 0; idx != null && i < this.pending.length; i++) {
-			if(this.pending[i] !== idx) { continue; }
+		var i = this.pending.indexOf(idx);
 
+		if(i!=-1)
 			this.pending.splice(i, 1);
-
-			break;
-		}
 
 		this.vals[idx] = val;
 		this.checkPending();
@@ -43,6 +41,7 @@ ParamList.prototype = {
 function errInfo(stepName, paramIdx, paramName) {
 	return { name: stepName, paramIdx: paramIdx, paramName: paramName };
 }
+
 function StepObj(params, jumpTo, data) {
 	this._params = params;
 	this.jumpTo = jumpTo;
@@ -51,8 +50,13 @@ function StepObj(params, jumpTo, data) {
 StepObj.prototype = {
 	val: function(name) {
 		var params = this._params, paramIdx = params.nextIdx();
+
+		if(!name && this.subParamList)
+			name = params.name+"("+paramIdx+")";
+
 		return function(err, val) {
-			if(err) { return params.error(err, errInfo(params.name, paramIdx, name)); }
+			if(err)
+				return params.error(err, errInfo(params.name, paramIdx, name));
 
 			params.done(paramIdx, val);
 		};
@@ -61,28 +65,18 @@ StepObj.prototype = {
 		name = (name || "array");
 		var params = this._params, paramIdx = params.nextIdx();
 		var arrayVals = new ParamList(function(err) {
-			if(err) { return params.error(err, errInfo(params.name, paramIdx, err.step.name)); }
+			if(err)
+				return params.error(err, errInfo(params.name, paramIdx, err.step.name));
 
 			params.done(paramIdx, arrayVals.vals.slice(1));
-		});
+		}, name, true);
 
 		// Handles arrays of zero length
 		process.nextTick(function() { arrayVals.checkPending(); });
 
 		return {
-			val: function(valName) {
-				var valIdx = arrayVals.nextIdx();
-				valName = (valName || name + "(" + valIdx + ")");
-
-				return function(err, val) {
-					if(err) { return arrayVals.error(err, errInfo("", 0, valName)); }
-
-					arrayVals.done(valIdx, val);
-				};
-			},
-			syncVal: function(val, name) {
-				this.val(name)(null, val);
-			}
+			val: this.val.bind(arrayVals),
+			syncVal: this.syncVal.bind(arrayVals)
 		};
 	},
 	syncVal: function(val, name) {
