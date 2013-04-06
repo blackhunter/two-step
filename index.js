@@ -1,16 +1,15 @@
-function ParamList(step, name, sub) {
-	this._idx = 0;
+function ParamList(step, name, some) {
+	this._idx = 1;
 	this._used = false;
 	this.vals = [ null ];
 	this.pending = [];
 	this.step = step;
 	this.name = name;
-	this.subParamList = sub || false;
+	this.some = some || false;
 }
 ParamList.prototype = {
-	nextIdx: function() {
+	nextIdx: function(){
 		var idx = this._idx++;
-
 		this.pending.push(idx);
 
 		return idx;
@@ -21,62 +20,141 @@ ParamList.prototype = {
 			this._used = true;
 		}
 	},
-	done: function(idx, val) {
+	ignore: function(idx){
 		var i = this.pending.indexOf(idx);
 
 		if(i!=-1)
 			this.pending.splice(i, 1);
 
-		this.vals[idx] = val;
+		this.checkPending();
+	},
+	done: function(idx, val, name){
+		if(this.some){
+			this.pending = [];
+			this.vals[1] = {
+				'0': name,
+				'1': val,
+				name: name,
+				result: val
+			}
+		}else{
+			var i = this.pending.indexOf(idx);
+
+			if(i!=-1){
+				this.pending.splice(i, 1);
+				this.vals[idx] = val;
+			}
+		}
+
 		this.checkPending();
 	},
 	error: function(err, info) {
+		this._used = true;
 		err.step = info;
 		this.vals[0] = err;
 		this.step.apply(null, this.vals);
 	}
 };
 
-
-function errInfo(stepName, paramIdx, paramName) {
-	return { name: stepName, paramIdx: paramIdx, paramName: paramName };
+function errInfo(stepName, paramIdx, paramName, subParam){
+	return {
+		name: stepName,
+		paramIdx: paramIdx,
+		paramName: paramName,
+		subParam: (subParam? {
+			paramIdx: 	subParam.paramIdx,
+			paramName: subParam.paramName
+		} : null)
+	};
 }
 
-function StepObj(params, jumpTo, data) {
+function StepObj(params, jumpTo, end, data){
 	this._params = params;
 	this.jumpTo = jumpTo;
+	this.end = end;
 	this.data = data;
 }
 StepObj.prototype = {
-	val: function(name) {
-		var params = this._params, paramIdx = params.nextIdx();
+	//TODO sendVal(funcName, name) - oczekiwanie na odpowiedz dopoiero w dalszych czesciach
+	val: function(name, filter){
+		var
+			params = this._params || this,
+			paramIdx = params.nextIdx();
 
-		if(!name && this.subParamList)
-			name = params.name+"("+paramIdx+")";
+		if(typeof name ==='function'){
+			filter = name;
+			name = null;
+		}
 
-		return function(err, val) {
-			if(err)
+		return function(err, val){
+			if(filter){
+				try{
+					val = filter.apply(this, arguments);
+					if(val===undefined)
+						return params.ignore(paramIdx);
+				}catch(e){
+					err = e;
+				}
+			}
+
+			if(err instanceof Error)
 				return params.error(err, errInfo(params.name, paramIdx, name));
+			else if(val===undefined)
+				val = err;
 
-			params.done(paramIdx, val);
+			params.done(paramIdx, val, name);
 		};
 	},
-	valArray: function(name) {
-		name = (name || "array");
-		var params = this._params, paramIdx = params.nextIdx();
-		var arrayVals = new ParamList(function(err) {
-			if(err)
-				return params.error(err, errInfo(params.name, paramIdx, err.step.name));
+	some: function(name, filter){
+		if(typeof name ==='function'){
+			filter = name;
+			name = null;
+		}
+		name = (name || "some");
 
-			params.done(paramIdx, arrayVals.vals.slice(1));
-		}, name, true);
+		var
+			self = this,
+			params = this._params,
+			paramIdx = params.nextIdx(),
+			arrayVals = new ParamList(function(err){
+				if(err)
+					return params.error(err, errInfo(params.name, paramIdx, name, err.step));
 
-		// Handles arrays of zero length
-		process.nextTick(function() { arrayVals.checkPending(); });
+				params.done(paramIdx, arrayVals.vals[1]);
+			}, name, true);
+
+		process.nextTick(function(){
+			arrayVals.checkPending();
+		});
 
 		return {
-			val: this.val.bind(arrayVals),
-			syncVal: this.syncVal.bind(arrayVals)
+			val: function(name){
+				return self.val.call(arrayVals, name, filter);
+			}
+		};
+	},
+	valArray: function(name){
+		name = name || 'array';
+
+		var
+			self = this,
+			params = this._params,
+			paramIdx = params.nextIdx(),
+			arrayVals = new ParamList(function(err){
+				if(err)
+					return params.error(err, errInfo(params.name, paramIdx, name, err.step));
+
+				params.done(paramIdx, arrayVals.vals.slice(1));
+			}, name);
+
+		// Handles arrays of zero length
+		process.nextTick(function(){
+			arrayVals.checkPending();
+		});
+
+		return {
+			val: self.val.bind(arrayVals),
+			syncVal: self.syncVal.bind(arrayVals)
 		};
 	},
 	syncVal: function(val, name) {
@@ -97,24 +175,44 @@ function TwoStep() {
 	var curIdx = 0;
 	var data = {};
 
-	function jumpTo(func, args) {
+	function jumpTo(func, args){
 		this._params._used = true;
 
 		if (typeof func === 'function') {
 			func.apply(this, args);
 			return;
+		}else if(Array.isArray(func)){
+			args = func;
+			func = undefined;
 		}
 
-		for(var i = 0; i < steps.length; i++) {
-			if(steps[i].name !== func) { continue; }
+		if(func===null)
+			curIdx++;
+		else if(func===undefined)
+			curIdx = steps.length
+		else{
+			for(var i = 0; i < steps.length; i++) {
+				if(steps[i].name !== func)
+					continue;
 
-			curIdx = i;
+				curIdx = i;
 
-			break;
+				break;
+			}
+			if(i === steps.length)
+				throw Error("Unknown jumpTo location: " + func);
 		}
-		if(i === steps.length) { throw Error("Unknown jumpTo location: " + func); }
 
 		process.nextTick(function() { nextStep.apply(null, args); });
+	}
+
+	function end(func, args){
+		if(typeof func !== 'function'){
+			args = func;
+			func = null;
+		}
+
+		jumpTo(func, args)
 	}
 
 	function nextStep(err) {
@@ -124,7 +222,7 @@ function TwoStep() {
 		if(curIdx >= steps.length) { return; }
 
 		var params = new ParamList(nextStep, steps[curIdx].name);
-		var stepObj = new StepObj(params, jumpTo, data);
+		var stepObj = new StepObj(params, jumpTo, end, data);
 
 		try {
 			steps[curIdx++].apply(stepObj, arguments);
