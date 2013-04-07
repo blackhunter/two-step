@@ -14,13 +14,16 @@ ParamList.prototype = {
 
 		return idx;
 	},
-	checkPending: function() {
-		if(!this._used && this.pending.length === 0) {
+	checkPending: function(){
+		if(!this._used && this.pending.length === 0){
 			this.step.apply(null, this.vals);
 			this._used = true;
 		}
 	},
 	ignore: function(idx){
+		if(this._used)
+			return;
+
 		var i = this.pending.indexOf(idx);
 
 		if(i!=-1)
@@ -29,6 +32,9 @@ ParamList.prototype = {
 		this.checkPending();
 	},
 	done: function(idx, val, name){
+		if(this._used)
+			return;
+
 		if(this.some){
 			this.pending = [];
 			this.vals[1] = {
@@ -48,7 +54,10 @@ ParamList.prototype = {
 
 		this.checkPending();
 	},
-	error: function(err, info) {
+	error: function(err, info){
+		if(this._used)
+			return;
+
 		this._used = true;
 		err.step = info;
 		this.vals[0] = err;
@@ -161,24 +170,26 @@ StepObj.prototype = {
 		this.val(name)(null, val);
 	},
 	listen: function(emitter, name) {
-		var params = this._params, paramIdx = params.nextIdx();
+		var
+			params = this._params, paramIdx = params.nextIdx(),
+			chunks = [];
 
-		var chunks = [];
-		emitter.on('data', function (chunk) { chunks.push(chunk); });
-		emitter.on('error', function(err) { params.error(err, errInfo(params.name, paramIdx, name)); });
-		emitter.on('end', function() { params.done(paramIdx, chunks); });
+		emitter.on('data', function(chunk){ chunks.push(chunk); });
+		emitter.on('error', function(err){ params.error(err, errInfo(params.name, paramIdx, name)); });
+		emitter.on('end', function(){ params.done(paramIdx, chunks); });
 	}
 };
 
 function TwoStep() {
-	var steps =  Array.prototype.slice.call(arguments);
-	var curIdx = 0;
-	var data = {};
+	var
+		steps =  Array.prototype.slice.call(arguments),
+		curIdx = 0,
+		data = {};
 
 	function jumpTo(func, args){
 		this._params._used = true;
 
-		if (typeof func === 'function') {
+		if (typeof func === 'function'){
 			func.apply(this, args);
 			return;
 		}else if(Array.isArray(func)){
@@ -189,21 +200,20 @@ function TwoStep() {
 		if(func===null)
 			curIdx++;
 		else if(func===undefined)
-			curIdx = steps.length
+			curIdx = steps.length;
 		else{
-			for(var i = 0; i < steps.length; i++) {
+			for(var i = 0; i < steps.length; i++){
 				if(steps[i].name !== func)
 					continue;
 
 				curIdx = i;
-
 				break;
 			}
 			if(i === steps.length)
 				throw Error("Unknown jumpTo location: " + func);
 		}
 
-		process.nextTick(function() { nextStep.apply(null, args); });
+		process.nextTick(function(){ nextStep.apply(null, args); });
 	}
 
 	function end(func, args){
@@ -217,17 +227,20 @@ function TwoStep() {
 
 	function nextStep(err) {
 		// If error occurs in the last test, re-throw exception.
-		if(err && curIdx === steps.length) { throw err; }
+		if(err && curIdx === steps.length)
+			throw err;
 
-		if(curIdx >= steps.length) { return; }
+		if(curIdx >= steps.length)
+			return;
 
-		var params = new ParamList(nextStep, steps[curIdx].name);
-		var stepObj = new StepObj(params, jumpTo, end, data);
+		var
+			params = new ParamList(nextStep, steps[curIdx].name),
+			stepObj = new StepObj(params, jumpTo, end, data);
 
-		try {
+		try{
 			steps[curIdx++].apply(stepObj, arguments);
 			params.checkPending(); // Handle case where nothing async occurs in the callback
-		} catch(e) {
+		}catch(e){
 			params.error(e, { name: steps[curIdx - 1].name });
 		}
 	}
